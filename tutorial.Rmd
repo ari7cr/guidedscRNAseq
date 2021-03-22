@@ -1,0 +1,851 @@
+---
+title: "tutorial"
+author: "Arian Abbasi"
+date: "22 3 2021"
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: lumen
+    fig_caption: yes
+  number_sections: default
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is the corresponding code to the workflow/results of the thesis of Arian Abbasi.
+
+Installation commands for the packages are available at the end.
+
+# Overview:
+
+![](F:/ARA/BA/Abbildungen/March/workflow_all.png)
+
+Figure 1: Here you can see the flowchart of the developed workflow in this thesis. Single-cell RNA sequencing data traverses multiple standard analysis steps (yellow), such as clustering and biomarker discovery, before applying tools for biological interpretation (green) and enhanced visualization of the data (red) with a variety of established packages but also with a new developed package (iCCL clustering) within the thesis. NGS dta was already converted into a SeuratObject beforehand.
+
+
+# Standard Analysis
+The Standard Analysis part of the workflow is fully conducted with the tool Seurat (4.0.0) and orientates along their established vignette. [1]
+
+```{r loaddata, echo = TRUE, eval = FALSE}
+# we need to load Seurat and ggplot2 packages (ggplot enables some plotting options like titles)
+library(Seurat)
+library(ggplot2)
+
+```
+
+## Data preparation
+Before we can start the analysis, we need to load the SeuratObject. In this thesis we will only look at a subset of the data, therefore we will firstly display cluster names and subset the desired complex accordingly
+
+```{r dataprep, echo = TRUE, eval = FALSE}
+#loading scRNAseq data (Cd45+ cells)
+Cd45 <- readRDS("F:/ALL_scRNA/CD45_Benannte Cluster/Cd45_Subcluster.RDS")
+#set the seurat clusters as idents
+Idents(object = Cd45) <- "seurat_clusters"
+#plot UMAP projection with repelling labels in-plot and without legend, ggplot generated title
+DimPlot(Cd45, label = TRUE, repel = 1, label.size = 7) + ggtitle("All Cd45+ cells") + NoLegend()
+
+```
+
+![](F:/ARA/BA/Abbildungen/March/cd45_2.png)
+
+```{r subset, echo = TRUE, eval = FALSE}
+#subsetting desired clusters into new "Macs" Seurat file
+Macs <- subset(Cd45, idents = c("0", "2", "5", "1", "8", "3", "4", "6", "14", "19"))
+#you could plot UMAP projection of subset as a visual control
+#DimPlot(Macs, label = TRUE, repel = TRUE) + NoLegend() + ggtitle("Subset")
+```
+
+
+### Identification of highly variable genes
+
+For downstream analysis we firstly calculate a subset of 2000 genes showing the highest cell-to-cell variation, meaning their expression fluctuates from highly expressed in some, to lowly expressed in other cells.
+
+```{r variablgenes, echo = TRUE, eval = FALSE}
+
+#identification of highly variable features
+Macs <- FindVariableFeatures(Macs, selection.method = "vst", nfeatures = 2000)
+#identification of the 10 most highly variable genes
+top10 <- head(VariableFeatures(Macs), 10)
+top10
+
+#plotting highly variable features
+#without labels
+plot1 <- VariableFeaturePlot(Macs)
+#with labels of top10
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+#plot both next to each other
+plot1 + plot2
+
+```
+
+![](F:/ARA/BA/Abbildungen/Seurat/VarFeatPlot_CD45MACS.png)
+
+
+### Scaling data
+
+To prevent domination of highly expressed genes in downstream analysis we apply linear transformation on the genes
+
+```{r scale, echo = TRUE, eval = FALSE}
+
+all.genes <- rownames(Macs)
+#linear transformation
+Macs <- ScaleData(Macs, features = all.genes)
+
+```
+
+### Linear dimensionality reduction
+To reduce data size for downstream analysis we use the method of Principal Component Analysis (PCA) which in general allows to extract relevant information from within a dataset and reduce its complexity into a lower dimension of 50 vectors, the so called principal components (PC), through linearity.
+
+```{r PCA, echo = TRUE, eval = FALSE}
+#principal component analysis
+Macs <- RunPCA(Macs, features = VariableFeatures(object = Macs))
+#visuaize PCA result as DimPlot
+DimPlot(Macs, reduction = "pca") + ggtitle("PCA")
+```
+
+![](F:/ARA/BA/Abbildungen/March/PCA.png)
+
+## 2D Clustering
+
+![](F:/ARA/BA/Abbildungen/March/iCCL2.png)
+
+Figure 2: Overview of the clustering steps for iCCL. Currently these are the standard Seurat Clustering Steps. User input through iCCL(SeuratObject, min.dim = x, max.dim = y), with x and y as numerals, enables the user to run Seurat clustering for the given SeuratObject for the specified dimension. The loop will generate four UMAP 2D projections for each dimension within the specified range x to y, for four granularity values (resolution z), which then can be compared.
+
+
+Clustering in Seurat makes use of prior PCA scores of cells wherefore we want to detect the best fitting number of principal components that represent a robust compression of the dataset. Seurat therefore provides identification methods, such as the elbow plot, which however are very complex, complicated for beginners and provide a subjective scope. To overcome these problems, I developed the interactive Comparative Clustering Loop package (iCCL). iCCL currently adapts two tools, both offering great improvements to workflows for beginners and advanced researchers.
+
+## Dimensionality prediction
+The first tool, predictdimension() offers a quantitative approach on determining the dimensionality before clustering. The method behind it builds on a method established by the Harvard Chan Bioinformatics Core [2], which defines following mathematical condition as a reliable entry point for choosing the principal components prior to clustering: The algorithm determines the minimum of two metric values (i.e. dimension), firstly the PC only contributing to five percent of the standard deviation with a cumulative contribution of 90 percent, and secondly the PC where the percent change in variation between PCs is less than 0.1 percent. The output is an elbow plot with metric values as dimensions, with the determined value leading to a color change in the plot.
+
+```{r iCCL1, echo = TRUE, eval = FALSE}
+#predict a approximative range for which clustering would make most sense
+library(iCCL1)
+predictdimension(Macs)
+
+```
+
+![](F:/ARA/BA/Abbildungen/March/dimensionpredict_macs.png)
+
+Algorithm determined dimension 20 as the minimal point covering majority of variation in data, thus we will run iCCL on a range starting at 20 to determine the best dimension which bests represents our clusters in consideration of the clusters in the old dataset.
+
+
+```{r iccl2, eval = FALSE, echo = TRUE}
+#proceed to run iCCL clustering algorithm for  the range between 20-23
+iCCL(Macs, 20, 23, "Macs")
+
+#after visual checking for best fit for cluster representation
+#we choose 22 dimensions and resolution 0.5 to proceed
+
+#it is also possible to cluster via Seurat standard commands
+#Macs <- FindNeighbors(Macs, dims = 1:22)
+#Macs <- FindClusters(Macs, resolution = 0.5)
+#Macs <- RunUMAP(Macs, dims = 1:22)
+#We can use further plotting options like label size:
+DimPlot(Macs, label = 1, label.size = 8, repel = 1)
+#or plot cells corresponding to treatment
+#for this we reverse the treatment order to 1. Sham and 2. Mi
+Macs$sample <- factor(Macs$sample, levels = c('Sham', 'Mi'))
+DimPlot(Macs, split.by = "sample", label = 1, repel = 1, label.size= 7) + NoLegend()
+DimPlot(Macs, group.by = "sample", label = 1, repel = 1, label.size= 5) + NoLegend() + ggtitle("Treatment")
+#we can change colors for better visualization
+DimPlot(Macs, group.by = "sample", cols = c("Mi" = "red", "Sham" = "blue")) + ggtitle("Experimental Condition")
+
+#save our Macs Object
+saveRDS(Macs, file = "Macs.rds")
+```
+
+![](F:/ARA/BA/Abbildungen/March/Macs_22_05.png)
+![](F:/ARA/BA/Abbildungen/March/splitted.png)
+![](F:/ARA/BA/Abbildungen/March/sample_blaurot.png)
+
+## Biomarker
+
+For downstream analysis, determining characteristic biomarkers of each cluster is of special importance, allowing biological interpretation. The FindMarkers() function automates this process via differential expression and generates a list containing genes and their respective values sorted by descending expression (log2 fold change). This list can be saved as a .csv and used to research markers of your clusters.
+
+
+```{r marker, eval = FALSE, echo = TRUE}
+Macs.markers <- FindAllMarkers(Macs, min.pct = 0.25, logfc.threshold = 0.25)
+#save as .csv
+write.csv(Macs.markers,"Macs.markers_march.csv")
+#get top 1 marker for each cluster
+library(dplyr)
+top1 <- Macs.markers %>% group_by(cluster) %>% top_n(n = 1, wt = avg_log2FC)
+#plot their expression
+FeaturePlot(Macs, features = top1$gene)
+# in this case expression of Cd74 is not very unique to cluster, we replace it with the next unique marker in the list for cluster 2
+#therefore we make a list with new adjusted  top1
+top1.adj <- c("Lyve1", "Spp1", "Lilra5", "Ccl8", "Cd209a", "Tpm1", "Ifit3", "Stmn1", "Saa3", "Stmn1", "Plac8", "S100a8", "Ccl5")
+FeaturePlot(Macs, features = top1.adj)
+
+#It is also possible to heatmap our overall top5
+top5 <- Macs.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
+DoHeatmap(Macs, features = top5$gene) + NoLegend()
+#to adjust column width we can subsample to an equal amount of cells (300 in this case)
+DoHeatmap(subset(Macs, downsample = 300), features = top5$gene, size = 4) + NoLegend()
+```
+
+![](F:/ARA/BA/Abbildungen/March/top1adj_featureplot_macs_nummern.png)
+
+![](F:/ARA/BA/Abbildungen/March/top5_subsample300.png)
+
+
+# Biological Interpretation
+
+##Cell Type Annotation
+To label cells of a datasets with unknown cell type composition (or as proof) we use SingleR [3] reference-based cell type classification. The algorithm behind it takes our dataset and annotates it against predefined databases.
+
+
+First we need to convert the SeruatObject into a SingleCellExperiment File and access the Benayoun et al. [4] "MouseRNAse" database.
+```{r singlerpre, echo = TRUE, eval = FALSE}
+library(scater)
+library(SingleR)
+library(celldex)
+library(scuttle)
+
+##preproccesing steps
+# convert Seurat Object into SingleCellExperiment file
+Macs.sce <- as.SingleCellExperiment(Macs)
+#load external Database you want to do the prediction from ONTO your Object (SummarizedExperiment class .se)
+#here we use built-in celldex MouseRNAseq database by Benayoun et al.
+mouseref.se <- MouseRNAseqData()
+#Rownames represent genes, store them in "common" value and paste into both databases
+common <- intersect(rownames(Macs.sce), rownames(mouseref.se))
+mouseref.se <- mouseref.se[common, ]
+Macs.sce <- Macs.sce[common, ]
+#normalize and log-transform dataset
+Macs.sce <- logNormCounts(Macs.sce)
+```
+
+Now we can start the annotation:
+```{r singler, eval = FALSE, echo = TRUE}
+##Annotation
+##create a prediction data frame with normal specificity (= label.main)
+pred.macs.main <- SingleR(test = Macs.sce, ref = mouseref.se, labels = mouseref.se$label.main)
+#look at the results as a table
+table(pred.macs.main$labels)
+#or as a heatmap
+plotScoreHeatmap(pred.macs.main)
+##Integration of labels of data frame onto your Database
+Macs$SingleR = pred.macs.main$labels
+#visualize with new labels
+DimPlot(Macs_progeny, group.by = "SingleR", label = TRUE, repel = 1, label.size = 7 ) + ggtitle("SingleR cell type prediction (normal specificity)")
+
+#We can also visualize our SingleR results splitted by treatment
+DimPlot(Macs, group.by = "SingleR", split.by = "sample", label = TRUE, repel = 1) +ggtitle("Cell Type by treatment")
+
+```
+
+![](F:/ARA/BA/Abbildungen/March/Screenshot_singlermain.png)
+
+![](F:/ARA/BA/Abbildungen/March/singler_heatmap_main.png)
+
+![](F:/ARA/BA/Abbildungen/March/singler_großelabels.png)
+
+![](F:/ARA/BA/Abbildungen/March/singler_splitteed.png)
+
+We can also access he high specificity frame of the database:
+```{r fine, echo = TRUE, eval = FALSE}
+##create a prediction data frame with high specificity (=label.fine)
+pred.macs.fine <- SingleR(test = Macs.sce, ref = mouseref.se, labels = mouseref.se$label.fine)
+table(pred.macs.fine$labels)
+#Integration of high spec. dataframe
+Macs$SingleR_fine = pred.macs.fine$labels
+##Integration of high spec. dataframe
+Macs.i$SingleR_fine = pred.macs$labels
+
+## visualizw with fine labels
+DimPlot(Macs, group.by = "SingleR_fine", label = TRUE, repel = TRUE, label.size = 6) + ggtitle("SingleR (high specificity)")
+
+
+#save our Macs Object
+saveRDS(Macs, file = "Macs_singleR.rds")
+
+```
+
+![](F:/ARA/BA/Abbildungen/March/Screenshot_singlerfine.png)
+
+![](F:/ARA/BA/Abbildungen/March/singler_fine_label6.png)
+
+
+## Pathway Responsive Genes
+PROGENy [5] [6]  is a linear model for inferring the activity of our expressed biomarkers for selected, predefined pathways against each respective cluster. In contrast to classic pathway mapping methods, PROGENy specializes in overcoming the limitations of disregarding post-translational modification effects by training a regression model on a large pool of perturbation experiments.
+
+Preparation steps:
+
+```{r progeny, eval = FALSE, echo = TRUE}
+library(progeny)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(pheatmap)
+library(tibble)
+
+## Compute Progeny activity scores and add them to our Seurat object as a new assay called Progeny. 
+Macs <- progeny(Macs, scale=FALSE, organism="Mouse", top=1000, perm=1, 
+                 return_assay = TRUE)
+# scale the pathway activity scores. 
+Macs <- Seurat::ScaleData(Macs, assay = "progeny") 
+# transform Progeny scores into a data frame
+progeny_scores_df <- 
+  as.data.frame(t(GetAssayData(Macs, slot = "scale.data", 
+                               assay = "progeny"))) %>%
+  rownames_to_column("Cell") %>%
+  gather(Pathway, Activity, -Cell) 
+
+# create a data frame with the specification of the cells that belong to each cluster to match with the Progeny scores.
+CellsClusters <- data.frame(Cell = names(Idents(Macs)), 
+                            CellType = as.character(Idents(Macs)),
+                            stringsAsFactors = FALSE)
+# match Progeny scores with the cell clusters.
+progeny_scores_df <- inner_join(progeny_scores_df, CellsClusters)
+# summarize the Progeny scores by cell population
+summarized_progeny_scores <- progeny_scores_df %>% 
+  group_by(Pathway, CellType) %>%
+  summarise(avg = mean(Activity), std = sd(Activity))
+##Plotting pathway activities for the different cell populations
+#prepare the data and set colorcoding
+summarized_progeny_scores_df <- summarized_progeny_scores %>%
+  dplyr::select(-std) %>%   
+  spread(Pathway, avg) %>%
+  data.frame(row.names = 1, check.names = FALSE, stringsAsFactors = FALSE) 
+paletteLength = 100
+myColor = colorRampPalette(c("Darkblue", "white","red"))(paletteLength)
+progenyBreaks = c(seq(min(summarized_progeny_scores_df), 0, 
+                      length.out=ceiling(paletteLength/2) + 1),
+                  seq(max(summarized_progeny_scores_df)/paletteLength, 
+                      max(summarized_progeny_scores_df), 
+                      length.out=floor(paletteLength/2)))
+```
+
+Plotting:
+```{r progenyplot, echo = TRUE, eval = FALSE}
+
+##Plot the heatmap
+progeny_hmap = pheatmap(t(summarized_progeny_scores_df[,-1]),fontsize=14, 
+                        fontsize_row = 10, 
+                        color=myColor, breaks = progenyBreaks, 
+                        main = "PROGENy (1000)", angle_col = 45,
+                        treeheight_col = 0,  border_color = NA)
+#we can save scores as a .csv
+write.csv(summarized_progeny_scores_df,"progeny_scores_grouped.csv")
+saveRDS(Macs, file = "Macs_progeny.rds")
+```
+
+![](F:/ARA/BA/Abbildungen/March/progeny_allgemein.png)
+
+In the end of the thesis I renamed my clusters with comparison to a meta-analysis. Re-running this part again gave us following results:
+
+![](F:/ARA/BA/Abbildungen/March/progeny_idents.png)
+
+
+## Gene enrichment / Ontology analysis
+An approach to understand properties and characteristics of the priorly identified gene list we can apply Gene Set Enrichment Analysis (GSEA) algorithms on latter, checking for significant over-represented matches inside predefined databases, such as Gene Ontology (GO) which is the largest database for information on annotated genes.
+
+Here we use ClusterProfileR [7] for GO analysis.
+
+
+```{r go, eval = FALSE, echo = TRUE}
+#library(enrichplot)
+library(clusterProfiler)
+
+#for this we use our markers
+##if you need to load them again use:
+markers <- read.csv("Macs.markers_march.csv")
+
+#possible domains to check for: BP (biological process) - MF(mol. fun.) - CC (cellular component ) - ALL
+#in our case we want to understand biolical processes our markers are involved in -> BP
+plot_cluster_go(markers, cluster_name = '0', org = "mouse", ont = "BP") + ggtitle("GO - Cluster 0: Biologial Process")
+plot_cluster_go(markers, cluster_name = '1', org = "mouse", ont = "BP") + ggtitle("GO - Cluster 1: Biologial Process")
+##you can do this for every cluster with changing the cluster number
+
+# or I made a loop to plot them at once
+
+list <- c(0:12)
+wd <- getwd()
+#name a directory you want to plot into
+dir.create("GO")
+#run loop
+for(k in list){
+  go <- plot_cluster_go(markers, cluster_name = k, org = "mouse", ont = "BP") + ggtitle("GO Biological Process - Cluster:", k)
+  print(k)
+  mypath <- file.path(wd, "GO", paste(k, ".png", sep = ""))
+  png(file=mypath, width = 1500, height = 480, res = 120)
+  print(go)
+  dev.off()
+}
+
+```
+
+![](F:/ARA/BA/Abbildungen/March/GO_0.png)
+
+## Ligand-Receptor Interaction
+
+In the traditional way, using bulk-analysis methods, it was unmanageable to generate insight into paracrine signalling pathways between different cells and to interpret them among varying tissues. Bioinformatic solutions to study intercellular communication, for instance NicheNet [8][8], established a weighted network out of existing databases for ligand–receptor, signal transduction and gene regulatory interactions. They compute ligand-receptor interaction predictions for gene expression data of interacting cells of our dataset (i.e. sender, receiver).
+<details>
+  <summary> Click to expand code </summary>
+
+
+First we need to load the databases and convert them to Mouse origin:
+(NicheNet heavily relies on tidyverse pipelines (%>%))
+```{r nichprepare, eval = FALSE, echo = TRUE}
+devtools::install_github("saeyslab/nichenetr")
+BiocManager::install("limma")
+library(nichenetr)
+library(tidyverse)
+library(dplyr)
+
+#load ligand Matrix
+ligand_target_matrix = readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+#load Ligand-Receptor-Network
+lr_network = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+#load weightened networks
+weighted_networks = readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+weighted_networks_lr = weighted_networks$lr_sig %>% inner_join(lr_network %>% distinct(from,to), by = c("from","to"))
+
+#Because the expression data is of mouse origin,
+#we will convert the NicheNet network gene symbols from human to mouse based on one-to-one orthology:
+lr_network = lr_network %>% mutate(from = convert_human_to_mouse_symbols(from), to = convert_human_to_mouse_symbols(to)) %>% drop_na()
+colnames(ligand_target_matrix) = ligand_target_matrix %>% colnames() %>% convert_human_to_mouse_symbols()
+rownames(ligand_target_matrix) = ligand_target_matrix %>% rownames() %>% convert_human_to_mouse_symbols()
+ligand_target_matrix = ligand_target_matrix %>% .[!is.na(rownames(ligand_target_matrix)), !is.na(colnames(ligand_target_matrix))]
+weighted_networks_lr = weighted_networks_lr %>% mutate(from = convert_human_to_mouse_symbols(from), to = convert_human_to_mouse_symbols(to)) %>% drop_na()
+
+```
+
+Now we can run the pipeline, which indeed is very long. We will further plot into a .pdf. To make adjustment easier for different data, this pipeline uses the object "seurat" which you can just assign your current SeuratObject to.
+
+```{r niche, eval = FALSE, echo= TRUE}
+#Define a "sender/niche" cell population and a "receiver/target" cell population present
+#in your expression data and determine which genes are expressed in both populations
+#consider a gene to be expressed when it is expressed in at least 10% of cells in one cluster.
+
+#so you dont have to change all according variables in the loop:
+seurat <- Macs
+
+#make a list with the cluster numbers, for which the loop(i) will run
+#Idents(seurat) <- "seurat_clusters"
+list <- levels(Idents(seurat))
+# or if you want to only run for a certain cluster (e.g. 1) use following:
+#list <- c(1:1)
+
+#start the pdf device with a file name
+pdf("NichNet.pdf")
+
+##start loop
+for (i in list){
+  #receiver
+  receiver = i
+  expressed_genes_receiver = get_expressed_genes(receiver, seurat, pct = 0.25)
+  background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+  #sender
+  sender_celltypes = list
+  list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seurat, 0.25)
+  #lapply to get the expressed genes of every sender cell type separately here
+  expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+ 
+  #Define a gene set of interest: these are the genes in the "receiver/target" cell
+  #population that are potentially affected by ligands expressed by interacting cells
+  #(e.g. genes differentially expressed upon cell-cell interaction)
+  seurat_obj_receiver= subset(seurat, idents = receiver)
+  seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["sample"]])
+  DE_table_receiver = FindMarkers(object = seurat, ident.1 = i, min.pct = 0.25) %>% rownames_to_column("gene")
+  geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+  geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+  
+  #Define a set of potential ligands: these are ligands that are expressed by the "sender/niche" cell population and bind a (putative) receptor expressed by the "receiver/target" population
+  #Because we combined the expressed genes of each sender cell type, in this example, we will perform one NicheNet analysis by pooling all ligands from all cell types together. Later on during the interpretation of the output, we will check which sender cell type expresses which ligand.
+  ligands = lr_network %>% pull(from) %>% unique()
+  receptors = lr_network %>% pull(to) %>% unique()
+  expressed_ligands = intersect(ligands,expressed_genes_sender)
+  expressed_receptors = intersect(receptors,expressed_genes_receiver)
+  potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+  
+  ##Perform NicheNet ligand activity analysis: rank the potential ligands based on the presence of their target genes in the gene set of interest (compared to the background set of genes)
+  ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+  ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+  ligand_activities
+  best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+  
+  #Dotplot of Ligands
+  a <- DotPlot(seurat, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis() + FontSize(x.text = 10, y.text = 7)
+  #Dotplot split by Sample
+  a2 <- DotPlot(seurat, features = best_upstream_ligands %>% rev(), cols = c("Green3", "Red3"), split.by = "sample", dot.scale = 5, scale.min = 10) + RotatedAxis() + FontSize(x.text = 10, y.text = 7)
+  #Infer receptors and top-predicted target genes of ligands that are top-ranked in the ligand activity analysis
+  
+  #Active target gene inference
+  active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+  active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+  order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+  order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+  rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() #make.names() for heatmap visualization of genes like H2-T23
+  colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() #make.names() for heatmap visualization of genes like H2-T23
+  vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+  p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + theme(axis.text.x = element_text(face = "italic")) + scale_fill_gradient2(low = "whitesmoke",  high = "purple", breaks = c(0,0.006,0.012))
+  
+  #plot Ligand and regulatory functions
+  b <- p_ligand_target_network
+  
+  ##Receptors of top-ranked ligands
+  lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+  best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+  lr_network_top_df_large = weighted_networks_lr %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+  lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+  lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+  dist_receptors = dist(lr_network_top_matrix, method = "binary")
+  hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+  order_receptors = hclust_receptors$labels[hclust_receptors$order]
+  dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+  hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+  order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+  order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+  order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+  vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+  rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+  colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+  p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+  
+  #plot ligand receptor netwok
+  c <- p_ligand_receptor_network
+  
+  #Receptors of top-ranked ligands, but after considering only bona fide ligand-receptor interactions documented in literature and publicly available databases
+  lr_network_strict = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+  ligands_bona_fide = lr_network_strict %>% pull(from) %>% unique()
+  receptors_bona_fide = lr_network_strict %>% pull(to) %>% unique()
+  lr_network_top_df_large_strict = lr_network_top_df_large %>% distinct(from,to) %>% inner_join(lr_network_strict, by = c("from","to")) %>% distinct(from,to)
+  lr_network_top_df_large_strict = lr_network_top_df_large_strict %>% inner_join(lr_network_top_df_large, by = c("from","to"))
+  lr_network_top_df_strict = lr_network_top_df_large_strict %>% spread("from","weight",fill = 0)
+  lr_network_top_matrix_strict = lr_network_top_df_strict %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df_strict$to)
+  dist_receptors = dist(lr_network_top_matrix_strict, method = "binary")
+  hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+  order_receptors = hclust_receptors$labels[hclust_receptors$order]
+  dist_ligands = dist(lr_network_top_matrix_strict %>% t(), method = "binary")
+  hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+  order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+  order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix_strict))
+  order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix_strict))
+  vis_ligand_receptor_network_strict = lr_network_top_matrix_strict[order_receptors, order_ligands_receptor]
+  rownames(vis_ligand_receptor_network_strict) = order_receptors %>% make.names()
+  colnames(vis_ligand_receptor_network_strict) = order_ligands_receptor %>% make.names()
+  
+  #plot ligand receptor network - strict
+  p_ligand_receptor_network_strict = vis_ligand_receptor_network_strict %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential\n(bona fide)")
+  d <- p_ligand_receptor_network_strict
+  
+  ##Summary visualizations of the NicheNet analysis
+  #combined heatmap: overlay ligand activities with target genes
+  ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+  rownames(ligand_pearson_matrix) = rownames(ligand_pearson_matrix) %>% make.names()
+  colnames(ligand_pearson_matrix) = colnames(ligand_pearson_matrix) %>% make.names()
+  vis_ligand_pearson = ligand_pearson_matrix[order_ligands, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+  p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)") + theme(legend.text = element_text(size = 9))
+  figures_without_legend = cowplot::plot_grid(p_ligand_pearson + theme(legend.position = "none", axis.ticks = element_blank()) + theme(axis.title.x = element_text()),
+                                              p_ligand_target_network + theme(legend.position = "none", axis.ticks = element_blank()) + ylab(""),
+                                              align = "hv",
+                                              nrow = 1,
+                                              rel_widths = c(ncol(vis_ligand_pearson)+10, ncol(vis_ligand_target)))
+  legends = cowplot::plot_grid(
+    ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_pearson)),
+    ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target_network)),
+    nrow = 1,
+    align = "h")
+  combined_plot = cowplot::plot_grid(figures_without_legend, legends, rel_heights = c(10,2), nrow = 2, align = "hv", labels = i)
+  
+  ##final combined plot
+  e <- combined_plot
+  f <- DoHeatmap(subset(seurat, downsample = 300), features = best_upstream_receptors, size = 3)
+  g <- DoHeatmap(subset(seurat, downsample = 300), features = best_upstream_ligands, size = 3)
+  print(a + labs(title = i))
+  print(a2 + labs(title = i))
+  print(b + labs(title = i))
+  print(c + labs(title = i))
+  print(d + labs(title = i))
+  print(e + labs(title = i))
+  print(f)
+  print(g)
+}
+
+dev.off()
+
+#another combined plot to print inside RStudio
+combined_plot2 = cowplot::plot_grid(figures_without_legend, legends, rel_heights = c(10,5), nrow = 2, align = "hv")
+combined_plot2
+
+```
+
+</details>
+
+This is a plot I selected for the thesis (cluster1) and displays the bona fide interaction potential
+![](F:/ARA/BA/Abbildungen/March/niche_1.png)
+
+# Enhanced Visualization
+
+
+## 3D Clusters
+
+We can also visualize our UMAP results in 3D for a better spatial clarity of distribution and correlations between our clusters. For this we compute and extract a third dimension which we assign to the z-axis. Fetching data from previous calculations (meta-data), such as SingleR and also experimental conditions allows us to color clusters accordingly. The output is a fully interactive, rotable HTML file with on-hover information about cell identity, that can be used locally but also allows implementation online.
+This method was established by [9] and uses plotly [10] and our SeuratObject.
+
+```{r 3d, echo = TRUE, eval = FALSE}
+library(Seurat)
+library(plotly)
+setwd("F:/ARA/BA/Abbildungen/March")
+Macs <- readRDS("macs_relabled_fin.Rds")
+
+
+##colored by seurat clusters
+
+#Run UMAP with third dimension
+Macs <- RunUMAP(Macs, dims = 1:22, n.components = 3L)
+umap_1 <- Macs[["umap"]]@cell.embeddings[,1]
+umap_2 <- Macs[["umap"]]@cell.embeddings[,2]
+umap_3 <- Macs[["umap"]]@cell.embeddings[,3]
+Embeddings(object = Macs, reduction = "umap")
+
+#Fetch Data you want to use
+plot.data <- FetchData(object = Macs, vars = c("UMAP_1", "UMAP_2", "UMAP_3", "seurat_clusters", "SingleR", "CellType"))
+plot.data$label <- paste(rownames(plot.data))
+
+
+
+```
+
+```{r 3d2, echo = FALSE, results="hide", include = FALSE}
+library(Seurat)
+library(plotly)
+setwd("F:/ARA/BA/Abbildungen/March")
+Macs <- readRDS("macs_relabled_fin.Rds")
+
+
+##colored by seurat clusters
+
+#Run UMAP with third dimension
+Macs <- RunUMAP(Macs, dims = 1:22, n.components = 3L)
+umap_1 <- Macs[["umap"]]@cell.embeddings[,1]
+umap_2 <- Macs[["umap"]]@cell.embeddings[,2]
+umap_3 <- Macs[["umap"]]@cell.embeddings[,3]
+Embeddings(object = Macs, reduction = "umap")
+
+#Fetch Data you want to use
+plot.data <- FetchData(object = Macs, vars = c("UMAP_1", "UMAP_2", "UMAP_3", "seurat_clusters", "SingleR", "CellType"))
+plot.data$label <- paste(rownames(plot.data))
+
+
+
+```
+
+
+In the plotting command you can adjust the metadata to color the cells for. (Also on-hover info and the assigned colors). In this case we will plot the CellTypes that we determined from the meta analysis.
+```{r run3d, echo = TRUE}
+#the plotting command:
+#we can choose the assay/meta.data we want to color by, and further assign colors to clusters
+plot_ly(data = plot.data, 
+        x = ~UMAP_3, y = ~UMAP_1, z = ~UMAP_2, 
+        color = ~CellType, 
+        colors = c( "salmon",      #cluster 0
+                    "orange",      #1
+                    "olivedrab",   #2
+                    "seagreen",    #3
+                    "palegreen",   #4
+                    "green",       #5
+                    "turquoise",   #6
+                    "cyan",        #7
+                    "blue",        #8
+                    "violet",      #9
+                    "purple",      #10
+                    "palevioletred",  #11
+                    "hotpink"      #12
+                   ),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 1.5, width=0.5), # controls size of points 1. 0.5
+        text= ~CellType, #This is that extra column we made earlier for which we will use for cell ID
+        hoverinfo="text")#When you visualize your plotly object, hovering your mouse pointer over a point shows cell names
+
+```
+
+## Enhanced Plots
+
+Scillus [11] offers some further plots about relations of our cells and clusters.
+```{r scillus, eval = FALSE, echo = TRUE}
+library(ggnewscale)
+library(Scillus)
+
+##Enhanced Plots for more Info about clusters & cell distribution
+#Number of Cells per experimental condition
+plot_stat(Macs, plot_type = "group_count") + ggtitle("Number of cells by treatment")
+
+#Number of Cells per cluster without grid
+plot_stat(Macs, plot_type = "cluster_count" ) + ggtitle(" Number of cells by cluster") +NoGrid()
+
+#Proportion of condition for clusters
+#plot_stat(Macs, plot_type = "prop_fill") + ggtitle(" Proportion of clusters in treatment [Scillus]")
+
+#See which clusters contribute to which treatment
+plot_stat(Macs, plot_type = "prop_multi") + ggtitle("Contribution of clusters total cell count of condition") + NoGrid() #% of all cells in treatment
+
+```
+
+![](F:/ARA/BA/Abbildungen/March/verteilung_kleinerdatensatz.png)
+
+![](F:/ARA/BA/Abbildungen/March/cells_procluster_macs.png)
+
+![](F:/ARA/BA/Abbildungen/March/macs_contributionclusters.png)
+
+You can now use this plot, or use the values and make a barplot via R:
+
+```{r bar, eval = TRUE, echo = TRUE}
+#you can use this plot, but for my thesis I used the determined values and made a new plot in R
+Values <- matrix(c(46, 1.1, 34, 1.3, 2.2, 7.2, 2.4, 2.1, 0.2,2.5,0.5,0.3,0.2,3,39.2,3.7,11.7,9.4,1.7,6.3,5.8,7.6,4.8,2.8,2.8,1), nrow = 2, ncol = 13, byrow = TRUE)
+colors = c("red", "blue")
+sample = c("Sham", "MI")
+clusters = c(0:12)
+barplot(Values, main = "Relative Contribution to Cells of Condition", names.arg = clusters, xlab = "clusters", ylab = "% of cells for condition", col = colors, ylim = c(0,100), beside = 0)
+#oder besides = TRUE
+legend("topright", sample, cex = 1.3, fill = colors)
+```
+
+
+## Making Data interactive
+
+This section also contains enrichR [12] GSEA analysis, as we will include it in the interactive cerebro [13] file.
+
+GSEA:
+```{r cerebro, eval = FALSE, echo = TRUE}
+##enrichR
+library(EnrichR)
+library(cerebroApp)
+library(msigdbr)
+
+##Get most expressed genes
+Macs <- getMarkerGenes(
+  Macs,
+  assay = 'RNA',
+  organism = 'mm',
+  groups = c('CellType', 'seurat_clusters', 'SingleR'),
+  name = 'cerebro_seurat', #will be used for pathwayenrichment (see next step)
+  only_pos = TRUE
+)
+
+#Perform pathway enrichment on marker genes
+Macs <- getEnrichedPathways(
+  Macs,
+  marker_genes_input = 'cerebro_seurat',
+  #adj_p_cutoff = 0.01,
+  max_terms = 100
+)
+
+##GenesetEnrichment with downloaded gmt file from #http://www.gsea-msigdb.org/gsea/msigdb
+#musmusculus, all of C2 CGP
+Macs <- performGeneSetEnrichmentAnalysis(
+  Macs,
+  assay = 'RNA',
+  GMT_file = "genesets_C2CGPcomplete_musmusculus.gmt" ,
+  groups = c('CellType','seurat_clusters','SingleR')
+)
+
+saveRDS(Macs, "Macs_cerebro_ende.rds")
+
+```
+
+Make a Cerebro .crb file and launch
+
+```{r launchcerebro, eval = FALSE, echo = TRUE}
+##preparefor cerebro
+##cerebro needs the metadata slots to be called by_sample, by_cluster
+Macs$by_sample <- Macs$sample
+Macs$by_cluster <- Macs$seurat_clusters
+
+
+#make cerebro file
+exportFromSeurat(
+  object = Macs,
+  file = 'cerebro.crb', #the filename
+  experiment_name = 'Macs BA Arian', #project name
+  organism = 'mm', #mus musculus
+  groups = c("CellType", "by_sample", "by_cluster", "SingleR"), #metadata options
+  nUMI = 'nCount_RNA',
+  nGene = 'nFeature_RNA',
+  add_all_meta_data = TRUE,
+  use_delayed_array = FALSE,
+  verbose = TRUE
+)
+
+##launch
+launchCerebro()
+#or use www.cardinet.hhu.de 
+```
+
+
+
+# Packages
+
+Here are commands to download the main packages that were used:
+
+## iCCL
+if (!require(devtools)) {
+  install.packages("devtools")
+}
+devtools::install_github("ari7cr/iCCL1")
+
+## Seurat
+install.packages('Seurat')
+
+## SingleR
+devtools::install_github('dviraran/SingleR')
+
+## PROGENy
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("progeny")
+
+## NicheNet
+devtools::install_github("saeyslab/nichenetr")
+
+## ClustrProfileR
+BiocManager::install("clusterProfiler")
+
+## Scillus
+devtools::install_github("xmc811/Scillus", ref = "development")
+
+
+
+# References
+
+1: Hao and Hao et al. Integrated analysis of multimodal single-cell data. bioRxiv (2020) [Seurat
+V4] <https://satijalab.org/seurat/>
+
+2: Khetani, R. (n.d.). Harvard Chan Bioinformatics Core (HBC). Retrieved March 10, 2021, from            <https://bioinformatics.sph.harvard.edu/> ,                                                                <https://hbctraining.github.io/scRNA-seq/lessons/elbow_plot_metric.html> 
+
+3: Aran D, Looney AP, Liu L, Wu E, Fong V, Hsu A, Chak S, Naikawadi RP, Wolters PJ, Abate AR, Butte
+  AJ, Bhattacharya M (2019). “Reference-based analysis of lung single-cell sequencing reveals a
+  transitional profibrotic macrophage.” _Nat. Immunol._, *20*, 163-172. doi:
+  10.1038/s41590-018-0276-y (URL: <https://doi.org/10.1038/s41590-018-0276-y>).
+
+4: Benayoun, Bérénice A., Elizabeth A. Pollina, Param Priya Singh, Salah Mahmoudi, Itamar Harel,           Kerriann M. Casey, Ben W. Dulken, Anshul Kundaje, and Anne Brunet. "Remodeling of Epigenome and         Transcriptome Landscapes with Aging in Mice Reveals Widespread Induction of Inflammatory Responses."    Genome Research 29.4 (2019): 697-709. Print. 
+
+5: Schubert, Michael, et al. "Perturbation-response genes reveal signaling footprints in cancer gene    expression." Nature communications 9.1 (2018): 1-11.
+
+6:  Holland, Christian H., Bence Szalai, and Julio Saez-Rodriguez. "Transfer of regulatory knowledge from human to mouse for functional genomics analysis." Biochimica et Biophysica Acta (BBA)-Gene Regulatory Mechanisms 1863.6 (2020): 194431.
+
+7: Yu, Guangchuang, et al. "clusterProfiler: an R package for comparing biological themes among gene    clusters." Omics: a journal of integrative biology 16.5 (2012): 284-287
+
+8: Browaeys, Robin, Wouter Saelens, and Yvan Saeys. "NicheNet: modeling intercellular communication          by  linking ligands to target genes." Nature methods 17.2 (2020): 159-162.,                               <https://github.com/saeyslab/nichenetr> for the vignettes that were used 
+
+9: Fahd Qadir, et al. 3D Plotting of scRNAseq data using Seurat objects. 1.3, Zenodo, 11 Oct. 2019.
+  <https://github.com/Dragonmasterx87/Interactive-3D-Plotting-in-Seurat-3.0.0/>
+
+10:  C. Sievert. Interactive Web-Based Data Visualization with R, plotly, and shiny. Chapman and         Hall/CRC Florida, 2020.
+  
+11: Mingchu Xu and Zhongqi Ge (2020). Scillus: Seurat wrapper package enhancing the processing and
+  visualization of single cell data. R package version 0.4.0.
+  
+12: Kai Guo (2021). EnrichR: Functional Enrichment analysis. R package version 0.3.0.
+
+13: Hillje, R., Pelicci, P.G. & Luzi, L. Cerebro: Interactive visualization of scRNA-seq data.
+  Bioinformatics (2019).
